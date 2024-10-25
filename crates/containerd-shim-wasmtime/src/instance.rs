@@ -154,7 +154,17 @@ impl<T: WasiConfig> Engine for WasmtimeEngine<T> {
                 continue;
             }
 
-            let compiled_layer = self.engine.precompile_module(&layer.layer)?;
+            use WasmBinaryType::*;
+
+            let compiled_layer = match WasmBinaryType::from_bytes(&layer.layer) {
+                Some(Module) => self.engine.precompile_module(&layer.layer)?,
+                Some(Component) => self.engine.precompile_component(&layer.layer)?,
+                None => {
+                    log::warn!("Unknow WASM binary type");
+                    continue;
+                }
+            };
+
             compiled_layers.push(Some(compiled_layer));
         }
 
@@ -231,15 +241,13 @@ where
             func.as_str(),
         );
 
-        let wasi_ctx = WasiPreview2Ctx::new(ctx)?;
-        let (mut store, mut linker) = store_for_context(&self.engine, wasi_ctx)?;
-
         stdio.redirect()?;
 
         // This is a adapter logic that converts wasip1 `_start` function to wasip2 `run` function.
         let status = match target {
             ComponentTarget::HttpProxy => {
-                wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)?;
+                let mut linker = component::Linker::new(&self.engine);
+                wasmtime_wasi_http::add_to_linker_async(&mut linker)?;
 
                 let pre = linker.instantiate_pre(&component)?;
                 let instance = ProxyPre::new(pre)?;
@@ -249,6 +257,9 @@ where
                 serve_conn(ctx, instance, cancel).await
             }
             ComponentTarget::Command => {
+                let wasi_ctx = WasiPreview2Ctx::new(ctx)?;
+                let (mut store, linker) = store_for_context(&self.engine, wasi_ctx)?;
+
                 let command = Command::instantiate_async(&mut store, &component, &linker).await?;
 
                 command
@@ -262,6 +273,9 @@ where
                     })
             }
             ComponentTarget::Core(func) => {
+                let wasi_ctx = WasiPreview2Ctx::new(ctx)?;
+                let (mut store, linker) = store_for_context(&self.engine, wasi_ctx)?;
+
                 let pre = linker.instantiate_pre(&component)?;
                 let instance = pre.instantiate_async(&mut store).await?;
 

@@ -67,7 +67,7 @@ pub(crate) async fn serve_conn(
     log::info!("Serving HTTP on http://{}/", listener.local_addr()?);
 
     let env = env.into_iter().collect();
-    let handler = ProxyHandler::new(instance, env);
+    let handler = Arc::new(ProxyHandler::new(instance, env));
 
     loop {
         tokio::select! {
@@ -107,35 +107,27 @@ pub(crate) async fn serve_conn(
     Ok(())
 }
 
-struct ProxyHandlerInner {
+
+struct ProxyHandler {
     instance_pre: ProxyPre<WasiPreview2Ctx>,
     next_id: AtomicU64,
     env: Vec<(String, String)>,
 }
 
-impl ProxyHandlerInner {
-    fn next_req_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
-    }
-}
-
-#[derive(Clone)]
-struct ProxyHandler(Arc<ProxyHandlerInner>);
-
 impl ProxyHandler {
     fn new(instance_pre: ProxyPre<WasiPreview2Ctx>, env: Vec<(String, String)>) -> Self {
-        Self(Arc::new(ProxyHandlerInner {
+        ProxyHandler {
             instance_pre,
             env,
             next_id: AtomicU64::from(0),
-        }))
+        }
     }
 
     fn wasi_store_for_request(&self, req_id: u64) -> Store<WasiPreview2Ctx> {
-        let engine = self.0.instance_pre.engine();
+        let engine = self.instance_pre.engine();
         let mut builder = wasmtime_wasi::WasiCtxBuilder::new();
 
-        builder.envs(&self.0.env);
+        builder.envs(&self.env);
         builder.env("REQUEST_ID", req_id.to_string());
 
         let ctx = WasiPreview2Ctx {
@@ -147,11 +139,13 @@ impl ProxyHandler {
         Store::new(engine, ctx)
     }
 
-    async fn handle_request(&self, req: Request) -> Result<hyper::Response<HyperOutgoingBody>> {
-        let inner = &self.0;
+    async fn handle_request(
+        self: Arc<Self>,
+        req: Request,
+    ) -> Result<hyper::Response<HyperOutgoingBody>> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
 
-        let req_id = inner.next_req_id();
+        let req_id = self.next_req_id();
 
         log::info!(
             "Request {req_id} handling {} to {}",
@@ -163,7 +157,7 @@ impl ProxyHandler {
 
         let req = store.data_mut().new_incoming_request(Scheme::Http, req)?;
         let out = store.data_mut().new_response_outparam(sender)?;
-        let proxy = inner.instance_pre.instantiate_async(&mut store).await?;
+        let proxy = self.instance_pre.instantiate_async(&mut store).await?;
 
         let task = tokio::spawn(async move {
             if let Err(e) = proxy
@@ -199,5 +193,9 @@ impl ProxyHandler {
                 bail!("guest never invoked `response-outparam::set` method: {e:?}")
             }
         }
+    }
+
+    fn next_req_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 }
