@@ -9,6 +9,7 @@ containerd-shim-wasm = { workspace = true, features = ["opentelemetry"] }
 log = { workspace = true }
 hyper = { workspace = true }
 tokio = { workspace = true, features = ["signal", "macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
 libc = { workspace = true }
 
 wasmtime = { workspace = true }
